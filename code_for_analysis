@@ -1,0 +1,238 @@
+# Library loading
+# comment out once everything is installed
+# !pip install -U pip setuptools wheel
+# !pip install -U spacy
+# !python -m spacy download en_core_web_lg
+
+import spacy as sp
+import pandas as pd
+import plotly.graph_objects as go
+import ast
+from ast import literal_eval
+import plotly.express as px
+import re
+import doctest
+# ustlize later for spacy
+nlp = sp.load("en_core_web_lg", exclude = ["tagger", "parser", "senter", "attribute_ruler", "lemmatizer", "ner"])
+
+# Functions
+
+## small datasets to be used
+data = pd.DataFrame([["1-2010", 1], ["2-2011", 2]], columns = ["Date", "Value"])
+data_updated = pd.DataFrame([["1-2010", 1, 2010], ["2-2011", 2, 2011]], columns = ["Date", "Value", "Year"])
+data_two = pd.DataFrame([["1-2029", 1], ["2-2030", 2]], columns = ["Date", "Value"])
+def to_date_year(dataframe, date_column_nm, formated_date):
+ """
+ takes in a dataframe, the date column name, and the formatted date
+ returns the dataframe with a new year column based on the date column
+ >>> to_date_year(data, "Date", "%m-%Y")
+ Date Value Year
+ 0 2010-01-01 1 2010
+ 1 2011-02-01 2 2011
+ >>> to_date_year(data_two, "Date", "%m-%Y")
+ Date Value Year
+ 0 2029-01-01 1 2029
+ 1 2030-02-01 2 2030
+
+ """
+ dataframe[date_column_nm] = pd.to_datetime(dataframe[date_column_nm], format = formated_date)
+ dataframe["Year"] = dataframe[date_column_nm].dt.year
+ return dataframe
+def clean(token, pattern: re.Pattern[str] = re.compile(r"\W+")):
+ """
+ Returns a given string and removes punctuation (retains spaces) and
+ forces lowercase
+ >>> clean("Hello!")
+ 'hello '
+ >>> clean("no I like penGUINs!")
+ 'no i like penguins '
+ """
+ return pattern.sub(" ", token.lower())
+def year_drop(dataframe):
+ """
+ takes in a given dataframe and drop the columns that don't meet the requirment
+ Assumes you have a column called "Year"
+ >>> year_drop(data_updated)
+ Date Value Year
+ 0 1-2010 1 2010
+ 1 2-2011 2 2011
+ >>> year_drop(data_two)
+ Empty DataFrame
+ Columns: [Date, Value, Year]
+ Index: []
+ """
+ dataframe = dataframe[dataframe["Year"] <= 2024]
+ return dataframe
+
+# used for testing
+doctest.run_docstring_examples(clean, globals())
+doctest.run_docstring_examples(to_date_year, globals())
+doctest.run_docstring_examples(year_drop, globals())
+
+
+# Dataset 1 alterations
+# original datasets
+# videogames dataset
+read_file_one = pd.read_csv("videogame_sum.csv")
+read_file_two = pd.read_csv("backloggd_games.csv")
+videogames = read_file_one.merge(read_file_two)
+videogames = videogames[videogames["Release_Date"] != "TBD"]
+videogames = to_date_year(videogames, "Release_Date", "%b %d, %Y")
+# tv dataset
+tv = pd.read_csv("TMDB_tv_dataset_v3.csv")
+tv = to_date_year(tv, "first_air_date", "%Y-%m-%d")
+books = pd.read_csv("Book_Details.csv")
+
+#q1 alterations:
+# keep only the rows you need
+genre_dataset_g = videogames[["Title", "Genres", "Year"]].dropna()
+genre_dataset_g["Genres"] = videogames.Genres.apply(literal_eval)
+genre_dataset_g = genre_dataset_g.explode("Genres")
+data_view_vg = genre_dataset_g.groupby(["Year", "Genres"], as_index = False)["Genres"].size()
+data_view_vg = year_drop(data_view_vg)
+# do the same thing for TV shows
+genre_dataset_v = tv[["genres", "name", "Year"]]
+genre_dataset_v = genre_dataset_v.set_index(["name", "Year"])
+genre_dataset_v = genre_dataset_v.genres.str.split(", ").reset_index()
+genre_dataset_v = genre_dataset_v.explode("genres")
+data_view_v = genre_dataset_v.groupby(["Year", "genres"], as_index = False)["genres"].size()
+data_view_v = year_drop(data_view_v)
+
+# q2 alterations:
+tv_ratings = tv[["Year", "vote_average"]]
+tv_ratings = tv_ratings.groupby("Year", as_index = False)["vote_average"].mean()
+tv_ratings["indicator"] = "TV"
+tv_ratings = year_drop(tv_ratings)
+videogames_rating = videogames[["Year", "Rating"]].dropna()
+videogames_rating = videogames_rating.groupby("Year", as_index = False)["Rating"].mean()
+videogames_rating["indicator"] = "Videogames"
+videogames_rating = year_drop(videogames_rating)
+merged_rating = tv_ratings.merge(videogames_rating, how = "outer")
+merged_rating["total_vote"] = merged_rating[["Rating", "vote_average"]].sum(axis = 1)
+
+# q3 alterations:
+summaries_tv = tv[["overview", "Year"]]
+summaries_tv = summaries_tv.dropna()
+summaries_tv = summaries_tv.groupby("Year", as_index = False)["overview"].agg(" ".join)
+summaries_tv["overview"] = summaries_tv["overview"].astype(str).transform(clean)
+summaries_tv = summaries_tv[["Year", "overview"]].drop_duplicates()
+summaries_tv = year_drop(summaries_tv)
+vid_g_summaries = videogames[["Year", "Summary"]]
+videogames = videogames.dropna()
+vid_g_summaries["Summary"] = vid_g_summaries["Summary"].astype(str)
+vid_g_summaries = vid_g_summaries.groupby("Year", as_index = False)["Summary"].agg(" ".join)
+vid_g_summaries["Summary"] = vid_g_summaries["Summary"].astype(str).transform(clean)
+vid_g_summaries = vid_g_summaries[["Year", "Summary"]].drop_duplicates().dropna()
+vid_g_summaries = year_drop(vid_g_summaries)
+vid_tv = summaries_tv.merge(vid_g_summaries)
+list_words_similairty = []
+for i in range(0, len(vid_tv)):
+ word_1 = nlp.pipe(vid_tv["overview"][i])
+ word_2 = nlp.pipe(vid_tv["Summary"][i])
+ word_1_comp = next(word_1)
+ word_2_comp = next(word_2)
+ list_words_similairty.append(word_1_comp.similarity(word_2_comp))
+vid_tv["similarity"] = list_words_similairty
+
+# q1
+
+fig = go.Figure()
+videog = px.bar(data_view_vg, x = "Year", y = "size", color = "Genres", barmode = "group")
+shows = px.bar(data_view_v, x = "Year", y = "size", color = "genres", barmode = "group")
+fig.add_traces(videog.data)
+fig.add_traces(shows.data)
+fig.update_layout(
+ xaxis = dict(
+ rangeselector = dict(
+ buttons = list([
+ dict(count = 1,
+ step = "year",
+ stepmode = "backward")])),
+ rangeslider = dict(
+ visible = True)),
+ updatemenus = [
+ dict(
+ active = 2,
+ buttons = list([
+ dict(label = "Videogame",
+ method = "update",
+ args = [{"visible": [True, False]}, {"title": "Videogame"}]),
+ dict(label = "Videos",
+ method = "update",
+ args = [{"visible": [False, True]}, {"title": "Video Media"}]),
+ dict(label = "Both",
+ method = "update",
+ args = [{"visible": [True, True]}, {"title": "Media genre count"}])
+ ])
+)],
+ title = "Media genre count",
+ yaxis_title = "Amount",
+ xaxis_title = "Year",
+ autosize = False,
+ width = 1650,
+ height = 800,
+ legend = dict(title = "Genres"))
+fig.show()
+
+# Q2
+
+fig = go.Figure()
+fig.add_trace(
+ go.Scatter(x = merged_rating["Year"], y = merged_rating["vote_average"],
+ name = "Video Media Rating"))
+fig.add_trace(
+ go.Scatter(x = merged_rating["Year"], y = [merged_rating.vote_average.mean()] * len(merged_rating),
+ name = "Video Media Rating Average"))
+fig.add_trace(
+ go.Scatter(x = merged_rating["Year"], y = [merged_rating.total_vote.mean()] * len(merged_rating),
+ name = "Average Rating Amongst all media"))
+fig.add_trace(
+ go.Scatter(x = merged_rating["Year"], y = merged_rating["Rating"], name = "Videogame Rating"))
+fig.add_trace(
+ go.Scatter(x = merged_rating["Year"], y = [merged_rating.Rating.mean()] * len(merged_rating),
+ name = "Videogame Rating Average"))
+fig.update_layout(
+ xaxis = dict(
+ rangeselector = dict(
+ buttons = list([
+ dict(count = 1,
+ step = "year",
+ stepmode = "backward")])),
+ rangeslider = dict(
+ visible = True)),
+ updatemenus = [
+ dict(
+ active = 2,
+ buttons = list([
+ dict(label = "Videogame",
+ method = "update",
+ args = [{"visible": [False, False, True, True, True]}, {"title": "Videogame"}]),
+ dict(label = "Videos",
+ method = "update",
+ args = [{"visible": [True, True, True, False, False]}, {"title": "Video Media"}]),
+ dict(label = "Both",
+ method = "update",
+ args = [{"visible": [True, True, True, True, True]}, {"title": "Media Rating Count"}])
+ ])
+ )],
+ title = "Media Rating Count",
+ xaxis_title = "Year",
+ yaxis_title = "Rating",
+ legend = dict(title = "Rating Kind")
+)
+fig.show()
+#fig.write_image("project_images/fig2.png")
+
+# Q3
+
+fig = go.Figure()
+fig = px.line(vid_tv, x = "Year", y = "similarity",
+ title = "Similarity between Media Synopsis",
+ labels = {
+ "similarity": "Overall Similarity (%)"
+ })
+fig.add_trace(
+ go.Scatter(x = vid_tv["Year"], y = [vid_tv.similarity.mean()] * len(vid_tv),
+ name = "Average Similarity of Media"))
+fig.show()
+# fig.write_image("project_images/fig3.png")
